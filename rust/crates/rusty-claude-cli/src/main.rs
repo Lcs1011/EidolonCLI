@@ -8655,6 +8655,30 @@ fn config_file_report_json(file: &ConfigFileReport) -> serde_json::Value {
     );
     object.insert("loaded".to_string(), serde_json::Value::Bool(file.loaded));
     object.insert(
+        "precedence_rank".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(file.precedence_rank)),
+    );
+    object.insert(
+        "wins_for_keys".to_string(),
+        serde_json::Value::Array(
+            file.wins_for_keys
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "shadowed_keys".to_string(),
+        serde_json::Value::Array(
+            file.shadowed_keys
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
         "status".to_string(),
         serde_json::Value::String(file.status.as_str().to_string()),
     );

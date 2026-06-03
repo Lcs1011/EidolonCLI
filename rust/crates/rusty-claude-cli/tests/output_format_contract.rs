@@ -1459,6 +1459,163 @@ fn config_json_reports_deprecations_structurally_without_stderr_duplicate_815() 
 }
 
 #[test]
+fn status_deduplicates_config_deprecation_warnings_per_invocation_425() {
+    let root = unique_temp_dir("status-warning-dedup-425");
+    let config_home = root.join("config-home");
+    let home = root.join("home");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::write(
+        config_home.join("settings.json"),
+        r#"{"enabledPlugins": {}}"#,
+    )
+    .expect("deprecated config fixture should write");
+
+    let envs = [
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("utf8 config home"),
+        ),
+        ("HOME", home.to_str().expect("utf8 home")),
+    ];
+    let output = run_claw(&root, &["status"], &envs);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    let warning_count = stderr
+        .matches("field \"enabledPlugins\" is deprecated")
+        .count();
+    assert_eq!(
+        warning_count, 1,
+        "status should emit the deprecated enabledPlugins warning once per process:\n{stderr}"
+    );
+}
+
+#[test]
+fn config_json_attributes_precedence_and_shadowed_keys_425() {
+    let root = unique_temp_dir("config-precedence-425");
+    let config_home = root.join("config-home");
+    let home = root.join("home");
+    fs::create_dir_all(root.join(".claw")).expect("workspace config should exist");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::write(
+        root.join(".claw.json"),
+        r#"{"model":"anthropic/claude-sonnet-4-6","env":{"A":"legacy","B":"legacy"}}"#,
+    )
+    .expect("legacy project config fixture should write");
+    fs::write(
+        root.join(".claw").join("settings.json"),
+        r#"{"model":"anthropic/claude-opus-4-6","env":{"A":"settings","C":"settings"}}"#,
+    )
+    .expect("project settings fixture should write");
+
+    let envs = [
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("utf8 config home"),
+        ),
+        ("HOME", home.to_str().expect("utf8 home")),
+    ];
+    let parsed = assert_json_command_with_env(&root, &["--output-format", "json", "config"], &envs);
+    let files = parsed["files"].as_array().expect("files array");
+    let legacy = files
+        .iter()
+        .find(|file| {
+            file["source"] == "project"
+                && file["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(".claw.json"))
+        })
+        .expect("project .claw.json entry");
+    let settings = files
+        .iter()
+        .find(|file| {
+            file["source"] == "project"
+                && file["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(".claw/settings.json"))
+        })
+        .expect("project .claw/settings.json entry");
+
+    assert_eq!(legacy["status"], "loaded");
+    assert_eq!(settings["status"], "loaded");
+    assert!(
+        settings["precedence_rank"].as_u64().expect("settings rank")
+            > legacy["precedence_rank"].as_u64().expect("legacy rank"),
+        "later project settings must outrank legacy project config: legacy={legacy} settings={settings}"
+    );
+    for key in ["model", "env.A"] {
+        assert!(
+            legacy["shadowed_keys"]
+                .as_array()
+                .expect("legacy shadowed keys")
+                .iter()
+                .any(|value| value.as_str() == Some(key)),
+            "legacy config should report {key} as shadowed: {legacy}"
+        );
+        assert!(
+            settings["wins_for_keys"]
+                .as_array()
+                .expect("settings winning keys")
+                .iter()
+                .any(|value| value.as_str() == Some(key)),
+            "project settings should report {key} as winning: {settings}"
+        );
+    }
+    assert!(
+        legacy["wins_for_keys"]
+            .as_array()
+            .expect("legacy winning keys")
+            .iter()
+            .any(|value| value.as_str() == Some("env.B")),
+        "unshadowed legacy keys should remain attributed to .claw.json: {legacy}"
+    );
+}
+
+#[test]
+fn config_section_json_tolerates_unknown_keys_as_warnings_425() {
+    let root = unique_temp_dir("config-unknown-warning-425");
+    let config_home = root.join("config-home");
+    let home = root.join("home");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::write(root.join(".claw.json"), r#"{"model":"opus","alpha":"x"}"#)
+        .expect("legacy config fixture should write");
+
+    let envs = [
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("utf8 config home"),
+        ),
+        ("HOME", home.to_str().expect("utf8 home")),
+    ];
+    let parsed = assert_json_command_with_env(
+        &root,
+        &["--output-format", "json", "config", "model"],
+        &envs,
+    );
+
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["section"], "model");
+    assert_eq!(parsed["section_value"], "opus");
+    assert!(
+        parsed["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("unknown key \"alpha\""))),
+        "unknown keys should be structural warnings, not section failures: {parsed}"
+    );
+}
+
+#[test]
 fn config_json_reports_structured_unloaded_file_reasons_407() {
     let root = unique_temp_dir("config-file-status-407");
     let config_home = root.join("config-home");

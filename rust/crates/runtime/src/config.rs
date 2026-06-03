@@ -99,6 +99,10 @@ pub struct ConfigFileReport {
     pub status: ConfigFileStatus,
     pub reason: Option<String>,
     pub detail: Option<String>,
+    pub precedence_rank: usize,
+    pub wins_for_keys: Vec<String>,
+    pub shadowed_keys: Vec<String>,
+    key_paths: Vec<String>,
 }
 
 /// Best-effort inspection of the config discovery and load pipeline.
@@ -463,12 +467,14 @@ impl ConfigLoader {
         let mut files = Vec::new();
         let mut load_error = None;
 
-        for entry in self.discover() {
+        for (index, entry) in self.discover().into_iter().enumerate() {
+            let precedence_rank = index + 1;
             if let Err(error) = crate::config_validate::check_unsupported_format(&entry.path) {
                 let detail = error.to_string();
                 load_error.get_or_insert_with(|| detail.clone());
                 files.push(ConfigFileReport::load_error(
                     entry,
+                    precedence_rank,
                     "unsupported_format",
                     detail,
                 ));
@@ -478,18 +484,28 @@ impl ConfigLoader {
             let parsed = match read_optional_json_object(&entry.path) {
                 Ok(OptionalConfigFile::Loaded(parsed)) => parsed,
                 Ok(OptionalConfigFile::NotFound) => {
-                    files.push(ConfigFileReport::not_found(entry));
+                    files.push(ConfigFileReport::not_found(entry, precedence_rank));
                     continue;
                 }
                 Ok(OptionalConfigFile::Skipped { reason, detail }) => {
-                    files.push(ConfigFileReport::skipped(entry, reason, detail));
+                    files.push(ConfigFileReport::skipped(
+                        entry,
+                        precedence_rank,
+                        reason,
+                        detail,
+                    ));
                     continue;
                 }
                 Err(error) => {
                     let reason = config_error_reason(&error).to_string();
                     let detail = error.to_string();
                     load_error.get_or_insert_with(|| detail.clone());
-                    files.push(ConfigFileReport::load_error(entry, reason, detail));
+                    files.push(ConfigFileReport::load_error(
+                        entry,
+                        precedence_rank,
+                        reason,
+                        detail,
+                    ));
                     continue;
                 }
             };
@@ -504,6 +520,7 @@ impl ConfigLoader {
                 load_error.get_or_insert_with(|| detail.clone());
                 files.push(ConfigFileReport::load_error(
                     entry,
+                    precedence_rank,
                     "validation_error",
                     detail,
                 ));
@@ -521,6 +538,7 @@ impl ConfigLoader {
                 load_error.get_or_insert_with(|| detail.clone());
                 files.push(ConfigFileReport::load_error(
                     entry,
+                    precedence_rank,
                     "validation_error",
                     detail,
                 ));
@@ -532,14 +550,22 @@ impl ConfigLoader {
             {
                 let detail = error.to_string();
                 load_error.get_or_insert_with(|| detail.clone());
-                files.push(ConfigFileReport::load_error(entry, "parse_error", detail));
+                files.push(ConfigFileReport::load_error(
+                    entry,
+                    precedence_rank,
+                    "parse_error",
+                    detail,
+                ));
                 continue;
             }
 
+            let key_paths = collect_config_key_paths(&parsed.object);
             deep_merge_objects(&mut merged, &parsed.object);
             loaded_entries.push(entry.clone());
-            files.push(ConfigFileReport::loaded(entry));
+            files.push(ConfigFileReport::loaded(entry, precedence_rank, key_paths));
         }
+
+        annotate_config_file_precedence(&mut files);
 
         let runtime_config = match build_runtime_config(merged, loaded_entries, mcp_servers) {
             Ok(config) => Some(config),
@@ -559,44 +585,118 @@ impl ConfigLoader {
 }
 
 impl ConfigFileReport {
-    fn loaded(entry: ConfigEntry) -> Self {
+    fn loaded(entry: ConfigEntry, precedence_rank: usize, key_paths: Vec<String>) -> Self {
         Self {
             entry,
             loaded: true,
             status: ConfigFileStatus::Loaded,
             reason: None,
             detail: None,
+            precedence_rank,
+            wins_for_keys: Vec::new(),
+            shadowed_keys: Vec::new(),
+            key_paths,
         }
     }
 
-    fn not_found(entry: ConfigEntry) -> Self {
+    fn not_found(entry: ConfigEntry, precedence_rank: usize) -> Self {
         Self {
             entry,
             loaded: false,
             status: ConfigFileStatus::NotFound,
             reason: Some("not_found".to_string()),
             detail: None,
+            precedence_rank,
+            wins_for_keys: Vec::new(),
+            shadowed_keys: Vec::new(),
+            key_paths: Vec::new(),
         }
     }
 
-    fn skipped(entry: ConfigEntry, reason: String, detail: Option<String>) -> Self {
+    fn skipped(
+        entry: ConfigEntry,
+        precedence_rank: usize,
+        reason: String,
+        detail: Option<String>,
+    ) -> Self {
         Self {
             entry,
             loaded: false,
             status: ConfigFileStatus::Skipped,
             reason: Some(reason),
             detail,
+            precedence_rank,
+            wins_for_keys: Vec::new(),
+            shadowed_keys: Vec::new(),
+            key_paths: Vec::new(),
         }
     }
 
-    fn load_error(entry: ConfigEntry, reason: impl Into<String>, detail: String) -> Self {
+    fn load_error(
+        entry: ConfigEntry,
+        precedence_rank: usize,
+        reason: impl Into<String>,
+        detail: String,
+    ) -> Self {
         Self {
             entry,
             loaded: false,
             status: ConfigFileStatus::LoadError,
             reason: Some(reason.into()),
             detail: Some(detail),
+            precedence_rank,
+            wins_for_keys: Vec::new(),
+            shadowed_keys: Vec::new(),
+            key_paths: Vec::new(),
         }
+    }
+}
+
+fn annotate_config_file_precedence(files: &mut [ConfigFileReport]) {
+    let mut winning_file_by_key = BTreeMap::new();
+    for (index, file) in files.iter().enumerate() {
+        if !file.loaded {
+            continue;
+        }
+        for key in &file.key_paths {
+            winning_file_by_key.insert(key.clone(), index);
+        }
+    }
+
+    for (index, file) in files.iter_mut().enumerate() {
+        if !file.loaded {
+            continue;
+        }
+        let mut wins_for_keys = Vec::new();
+        let mut shadowed_keys = Vec::new();
+        for key in &file.key_paths {
+            if winning_file_by_key.get(key).copied() == Some(index) {
+                wins_for_keys.push(key.clone());
+            } else {
+                shadowed_keys.push(key.clone());
+            }
+        }
+        file.wins_for_keys = wins_for_keys;
+        file.shadowed_keys = shadowed_keys;
+    }
+}
+
+fn collect_config_key_paths(object: &BTreeMap<String, JsonValue>) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (key, value) in object {
+        collect_config_key_paths_for_value(key, value, &mut keys);
+    }
+    keys
+}
+
+fn collect_config_key_paths_for_value(prefix: &str, value: &JsonValue, keys: &mut Vec<String>) {
+    match value {
+        JsonValue::Object(object) if !object.is_empty() => {
+            for (key, nested) in object {
+                collect_config_key_paths_for_value(&format!("{prefix}.{key}"), nested, keys);
+            }
+        }
+        _ => keys.push(prefix.to_string()),
     }
 }
 
@@ -2982,23 +3082,23 @@ mod tests {
         .expect("write user settings");
 
         // when
-        let error = ConfigLoader::new(&cwd, &home)
-            .load()
-            .expect_err("config should fail");
+        let (_config, warnings) = ConfigLoader::new(&cwd, &home)
+            .load_collecting_warnings()
+            .expect("unknown config keys should load with warnings");
 
         // then
-        let rendered = error.to_string();
+        let rendered = warnings.join("\n");
         assert!(
             rendered.contains(&user_settings.display().to_string()),
-            "error should include file path, got: {rendered}"
+            "warning should include file path, got: {rendered}"
         );
         assert!(
             rendered.contains("line 3"),
-            "error should include line number, got: {rendered}"
+            "warning should include line number, got: {rendered}"
         );
         assert!(
             rendered.contains("telemetry"),
-            "error should name the offending field, got: {rendered}"
+            "warning should name the offending field, got: {rendered}"
         );
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
@@ -3020,28 +3120,23 @@ mod tests {
         .expect("write user settings");
 
         // when
-        let error = ConfigLoader::new(&cwd, &home)
-            .load()
-            .expect_err("config should fail");
+        let (_config, warnings) = ConfigLoader::new(&cwd, &home)
+            .load_collecting_warnings()
+            .expect("legacy unknown config keys should load with warnings");
 
         // then
-        let rendered = error.to_string();
+        let rendered = warnings.join("\n");
         assert!(
             rendered.contains(&user_settings.display().to_string()),
-            "error should include file path, got: {rendered}"
+            "warning should include file path, got: {rendered}"
         );
         assert!(
             rendered.contains("line 3"),
-            "error should include line number, got: {rendered}"
+            "warning should include line number, got: {rendered}"
         );
         assert!(
             rendered.contains("allowedTools"),
-            "error should call out the unknown field, got: {rendered}"
-        );
-        // allowedTools is an unknown key; validator should name it in the error
-        assert!(
-            rendered.contains("allowedTools"),
-            "error should name the offending field, got: {rendered}"
+            "warning should name the offending field, got: {rendered}"
         );
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
@@ -3101,19 +3196,19 @@ mod tests {
         fs::write(&user_settings, "{\n  \"modle\": \"opus\"\n}\n").expect("write user settings");
 
         // when
-        let error = ConfigLoader::new(&cwd, &home)
-            .load()
-            .expect_err("config should fail");
+        let (_config, warnings) = ConfigLoader::new(&cwd, &home)
+            .load_collecting_warnings()
+            .expect("unknown config keys should load with warnings");
 
         // then
-        let rendered = error.to_string();
+        let rendered = warnings.join("\n");
         assert!(
             rendered.contains("modle"),
-            "error should name the offending field, got: {rendered}"
+            "warning should name the offending field, got: {rendered}"
         );
         assert!(
             rendered.contains("model"),
-            "error should suggest the closest known key, got: {rendered}"
+            "warning should suggest the closest known key, got: {rendered}"
         );
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

@@ -424,9 +424,10 @@ fn validate_object_keys(
         } else if DEPRECATED_FIELDS.iter().any(|d| d.name == key) {
             // Deprecated key — handled separately, not an unknown-key error.
         } else {
-            // Unknown key.
+            // Unknown key — preserve compatibility by surfacing it as a warning
+            // instead of blocking otherwise valid config files.
             let suggestion = suggest_field(key, &known_names);
-            result.errors.push(ConfigDiagnostic {
+            result.warnings.push(ConfigDiagnostic {
                 path: path_display.to_string(),
                 field: field_path,
                 line: find_key_line(source, key),
@@ -605,10 +606,11 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].field, "unknownField");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].field, "unknownField");
         assert!(matches!(
-            result.errors[0].kind,
+            result.warnings[0].kind,
             DiagnosticKind::UnknownKey { .. }
         ));
     }
@@ -688,9 +690,10 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].line, Some(3));
-        assert_eq!(result.errors[0].field, "badKey");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].line, Some(3));
+        assert_eq!(result.warnings[0].field, "badKey");
     }
 
     #[test]
@@ -719,8 +722,9 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].field, "hooks.BadHook");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].field, "hooks.BadHook");
     }
 
     #[test]
@@ -785,8 +789,9 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].field, "permissions.denyAll");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].field, "permissions.denyAll");
     }
 
     #[test]
@@ -800,8 +805,9 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].field, "sandbox.containerMode");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].field, "sandbox.containerMode");
     }
 
     #[test]
@@ -815,8 +821,9 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].field, "plugins.autoUpdate");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].field, "plugins.autoUpdate");
     }
 
     #[test]
@@ -830,8 +837,9 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].field, "oauth.secret");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].field, "oauth.secret");
     }
 
     #[test]
@@ -866,8 +874,9 @@ mod tests {
         let result = validate_config_file(object, source, &test_path());
 
         // then
-        assert_eq!(result.errors.len(), 1);
-        match &result.errors[0].kind {
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        match &result.warnings[0].kind {
             DiagnosticKind::UnknownKey {
                 suggestion: Some(s),
             } => assert_eq!(s, "model"),
@@ -878,7 +887,7 @@ mod tests {
     #[test]
     fn format_diagnostics_includes_all_entries() {
         // given
-        let source = r#"{"permissionMode": "plan", "badKey": 1}"#;
+        let source = r#"{"model": 42, "badKey": 1}"#;
         let parsed = JsonValue::parse(source).expect("valid json");
         let object = parsed.as_object().expect("object");
         let result = validate_config_file(object, source, &test_path());
@@ -890,7 +899,7 @@ mod tests {
         assert!(output.contains("warning:"));
         assert!(output.contains("error:"));
         assert!(output.contains("badKey"));
-        assert!(output.contains("permissionMode"));
+        assert!(output.contains("model"));
     }
 
     #[test]
