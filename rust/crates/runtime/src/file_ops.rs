@@ -38,9 +38,37 @@ fn is_binary_file(path: &Path) -> io::Result<bool> {
 /// Validate that a resolved path stays within the given workspace root.
 /// Returns the canonical path on success, or an error if the path escapes
 /// the workspace boundary (e.g. via `../` traversal or symlink).
+fn normalize_windows_extended_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+
+        path.to_path_buf()
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
+/// Validate that a resolved path stays within the given workspace root.
+/// Returns success only when the normalized target path is inside the
+/// normalized workspace root.
 #[allow(dead_code)]
 fn validate_workspace_boundary(resolved: &Path, workspace_root: &Path) -> io::Result<()> {
-    if !resolved.starts_with(workspace_root) {
+    let resolved = normalize_windows_extended_path(resolved);
+    let workspace_root = normalize_windows_extended_path(workspace_root);
+
+    if !resolved.starts_with(&workspace_root) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
@@ -50,6 +78,7 @@ fn validate_workspace_boundary(resolved: &Path, workspace_root: &Path) -> io::Re
             ),
         ));
     }
+
     Ok(())
 }
 
@@ -527,9 +556,11 @@ fn build_grep_content_output(
 }
 
 fn canonicalize_workspace_root(workspace_root: &Path) -> PathBuf {
-    workspace_root
+    let canonical = workspace_root
         .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf())
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+
+    normalize_windows_extended_path(&canonical)
 }
 
 fn should_skip_glob_dir(entry: &DirEntry) -> bool {

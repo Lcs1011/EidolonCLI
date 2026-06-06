@@ -484,27 +484,6 @@ fn permission_mode_from_plugin(value: &str) -> Result<PermissionMode, String> {
 pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "bash",
-            description: "Execute a shell command in the current workspace.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
-                    "description": { "type": "string" },
-                    "run_in_background": { "type": "boolean" },
-                    "dangerouslyDisableSandbox": { "type": "boolean" },
-                    "namespaceRestrictions": { "type": "boolean" },
-                    "isolateNetwork": { "type": "boolean" },
-                    "filesystemMode": { "type": "string", "enum": ["off", "workspace-only", "allow-list"] },
-                    "allowedMounts": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["command"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
             name: "read_file",
             description: "Read a text file from the workspace.",
             input_schema: json!({
@@ -793,21 +772,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": true
             }),
             required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "REPL",
-            description: "Execute code in a REPL-like subprocess.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "code": { "type": "string" },
-                    "language": { "type": "string" },
-                    "timeout_ms": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["code", "language"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
             name: "PowerShell",
@@ -1372,13 +1336,6 @@ fn execute_tool_with_enforcer(
     input: &Value,
 ) -> Result<String, String> {
     match name {
-        "bash" => {
-            // Parse input to get the command for permission classification
-            let bash_input: BashCommandInput = from_value(input)?;
-            let classified_mode = classify_bash_permission(&bash_input.command);
-            maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            run_bash(bash_input)
-        }
         "read_file" => {
             let file_input: ReadFileInput = from_value(input)?;
             let required_mode = classify_read_path_permission(&file_input.path, false);
@@ -1442,7 +1399,6 @@ fn execute_tool_with_enforcer(
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "REPL" => from_value::<ReplInput>(input).and_then(run_repl),
         "PowerShell" => {
             // Parse input to get the command for permission classification
             let ps_input: PowerShellInput = from_value(input)?;
@@ -4279,7 +4235,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "SendUserMessage",
         ],
         "Verification" => vec![
-            "bash",
             "read_file",
             "glob_search",
             "grep_search",
@@ -4303,7 +4258,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "SendUserMessage",
         ],
         "statusline-setup" => vec![
-            "bash",
             "read_file",
             "write_file",
             "edit_file",
@@ -4312,7 +4266,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "ToolSearch",
         ],
         _ => vec![
-            "bash",
             "read_file",
             "write_file",
             "edit_file",
@@ -4328,7 +4281,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "SendUserMessage",
             "Config",
             "StructuredOutput",
-            "REPL",
             "PowerShell",
         ],
     };
@@ -6578,24 +6530,80 @@ fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCo
 }
 
 fn detect_powershell_shell() -> std::io::Result<&'static str> {
-    if command_exists("pwsh") {
+    #[cfg(windows)]
+    {
         Ok("pwsh")
-    } else if command_exists("powershell") {
-        Ok("powershell")
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
-        ))
+    }
+
+    #[cfg(not(windows))]
+    {
+        if command_exists("pwsh") {
+            Ok("pwsh")
+        } else if command_exists("powershell") {
+            Ok("powershell")
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
+            ))
+        }
     }
 }
 
+#[cfg(windows)]
+fn command_exists(command: &str) -> bool {
+    std::process::Command::new("cmd.exe")
+        .arg("/c")
+        .arg("where")
+        .arg(command)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(windows))]
 fn command_exists(command: &str) -> bool {
     std::process::Command::new("sh")
         .arg("-lc")
         .arg(format!("command -v {command} >/dev/null 2>&1"))
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn make_powershell_command_text(command: &str) -> String {
+    format!(
+        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); \
+         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); \
+         $OutputEncoding = [Console]::OutputEncoding; \
+         {command}"
+    )
+}
+
+fn make_powershell_process(shell: &str, command: &str) -> std::process::Command {
+    let command = make_powershell_command_text(command);
+
+    #[cfg(windows)]
+    {
+        let mut process = std::process::Command::new("cmd.exe");
+        process
+            .arg("/c")
+            .arg("pwsh")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(command);
+        process
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut process = std::process::Command::new(shell);
+        process
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(command);
+        process
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -6606,11 +6614,7 @@ fn execute_shell_command(
     run_in_background: Option<bool>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
-        let child = std::process::Command::new(shell)
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(command)
+        let child = make_powershell_process(shell, command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -6634,12 +6638,7 @@ fn execute_shell_command(
         });
     }
 
-    let mut process = std::process::Command::new(shell);
-    process
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(command);
+    let mut process = make_powershell_process(shell, command);
     process
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -9629,7 +9628,6 @@ mod tests {
             .contains("Command exceeded timeout"));
 
         let background = execute_tool(
-            "bash",
             &json!({ "command": "sleep 1", "run_in_background": true }),
         )
         .expect("bash background should succeed");
@@ -9641,7 +9639,6 @@ mod tests {
     #[test]
     fn bash_tool_classifies_test_timeout_as_hung_with_provenance() {
         let timeout = execute_tool(
-            "bash",
             &json!({ "command": "sleep 1 # cargo test slow_case", "timeout": 10 }),
         )
         .expect("bash timeout should return output");
@@ -9675,7 +9672,6 @@ mod tests {
         std::env::set_current_dir(&root).expect("set cwd");
 
         let output = execute_tool(
-            "bash",
             &json!({ "command": "cargo test --workspace --all-targets" }),
         )
         .expect("preflight should return structured output");
@@ -9725,7 +9721,6 @@ mod tests {
         std::env::set_current_dir(&root).expect("set cwd");
 
         let output = execute_tool(
-            "bash",
             &json!({ "command": "printf 'targeted ok'; cargo test -p runtime stale_branch" }),
         )
         .expect("targeted commands should still execute");
@@ -10272,7 +10267,6 @@ mod tests {
     #[test]
     fn repl_executes_python_code() {
         let result = execute_tool(
-            "REPL",
             &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 500}),
         )
         .expect("REPL should succeed");
@@ -10301,7 +10295,6 @@ mod tests {
     #[test]
     fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
         let result = execute_tool(
-            "REPL",
             &json!({
                 "language": "python",
                 "code": "import time\ntime.sleep(1)",
@@ -10470,8 +10463,7 @@ printf 'pwsh:%s' "$1"
         let registry = workspace_write_registry();
         let err = registry
             .execute(
-                "bash",
-                &json!({ "command": r"cat C:\\Users\\alice\\.ssh\\config" }),
+                    &json!({ "command": r"cat C:\\Users\\alice\\.ssh\\config" }),
             )
             .expect_err("Windows absolute path should require elevated permission");
         assert!(

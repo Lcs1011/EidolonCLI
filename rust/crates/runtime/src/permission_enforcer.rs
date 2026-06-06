@@ -180,22 +180,60 @@ impl PermissionEnforcer {
 /// cannot escape the sandbox via a naive string prefix match. Normalization is
 /// lexical (it does not touch the filesystem) because the target path may not
 /// exist yet on a write, and we must not depend on CWD.
+fn normalize_windows_extended_path_string(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+
+        if let Some(rest) = path.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+
+        path.to_string()
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
+fn normalize_workspace_compare_string(path: &str) -> String {
+    let normalized = normalize_windows_extended_path_string(path);
+
+    #[cfg(windows)]
+    {
+        normalized.replace('/', r"\").to_ascii_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
 fn is_within_workspace(path: &str, workspace_root: &str) -> bool {
-    let combined = if path.starts_with('/') {
-        path.to_owned()
+    let path_buf = std::path::PathBuf::from(path);
+    let root_buf = std::path::PathBuf::from(workspace_root);
+
+    let candidate = if path_buf.is_absolute() {
+        path_buf
     } else {
-        format!("{workspace_root}/{path}")
+        root_buf.join(path_buf)
     };
 
-    let normalized = lexically_normalize(&combined);
-    let root = lexically_normalize(workspace_root);
-    let root_with_slash = if root.ends_with('/') {
+    let candidate = normalize_workspace_compare_string(&candidate.to_string_lossy());
+    let root = normalize_workspace_compare_string(&root_buf.to_string_lossy());
+
+    let root_with_separator = if root.ends_with(std::path::MAIN_SEPARATOR) {
         root.clone()
     } else {
-        format!("{root}/")
+        format!("{root}{}", std::path::MAIN_SEPARATOR)
     };
 
-    normalized == root || normalized.starts_with(&root_with_slash)
+    candidate == root || candidate.starts_with(&root_with_separator)
 }
 
 /// Collapse `.` and `..` segments without consulting the filesystem.
@@ -431,6 +469,39 @@ mod tests {
         assert!(is_within_workspace("/workspace", "/workspace"));
         assert!(!is_within_workspace("/etc/passwd", "/workspace"));
         assert!(!is_within_workspace("/workspacex/hack", "/workspace"));
+    }
+    
+    #[test]
+    #[cfg(windows)]
+    fn workspace_boundary_allows_windows_extended_path_prefix() {
+        assert!(is_within_workspace(
+            r"\\?\C:\EdolonCode\file.md",
+            r"C:\EdolonCode"
+        ));
+    
+        assert!(is_within_workspace(
+            r"\\?\C:\EdolonCode\src\main.rs",
+            r"C:\EdolonCode"
+        ));
+    
+        assert!(!is_within_workspace(
+            r"\\?\C:\EdolonCodeX\file.md",
+            r"C:\EdolonCode"
+        ));
+    }
+    
+    #[test]
+    #[cfg(windows)]
+    fn workspace_boundary_allows_windows_unc_extended_path_prefix() {
+        assert!(is_within_workspace(
+            r"\\?\UNC\server\share\EdolonCode\file.md",
+            r"\\server\share\EdolonCode"
+        ));
+    
+        assert!(!is_within_workspace(
+            r"\\?\UNC\server\share\Other\file.md",
+            r"\\server\share\EdolonCode"
+        ));
     }
 
     #[test]

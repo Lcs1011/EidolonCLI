@@ -13,3 +13,12 @@ archive/
 status-help.txt
 # Legacy Python port session scratch artifacts
 .port_sessions/
+
+rust/target/
+target/
+.claw/
+.port_sessions/
+.idea/
+*.exe
+*.pdb
+*.rlib
