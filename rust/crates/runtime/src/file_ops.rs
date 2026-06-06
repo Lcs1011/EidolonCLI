@@ -155,6 +155,29 @@ pub struct EditFileOutput {
     pub git_diff: Option<serde_json::Value>,
 }
 
+
+/// Output envelope for Markdown annotation insertions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnnotateMarkdownOutput {
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+
+    pub annotation: String,
+
+    pub anchor: Option<String>,
+
+    pub position: String,
+
+    #[serde(rename = "originalFile")]
+    pub original_file: String,
+
+    #[serde(rename = "structuredPatch")]
+    pub structured_patch: Vec<StructuredPatchHunk>,
+
+    #[serde(rename = "gitDiff")]
+    pub git_diff: Option<String>,
+}
+
 /// Result of a glob-based filename search.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobSearchOutput {
@@ -259,6 +282,345 @@ pub fn read_file(
     })
 }
 
+fn detect_line_ending_style(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn normalize_line_endings_to(text: &str, newline: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+
+    if newline == "\n" {
+        normalized
+    } else {
+        normalized.replace('\n', newline)
+    }
+}
+
+fn preserve_existing_text_style(content: &str, original: Option<&str>) -> String {
+    let Some(original) = original else {
+        return content.to_owned();
+    };
+
+    let newline = detect_line_ending_style(original);
+    let mut styled = normalize_line_endings_to(content, newline);
+
+    if original.starts_with('\u{feff}') && !styled.starts_with('\u{feff}') {
+        styled.insert(0, '\u{feff}');
+    }
+
+    styled
+}
+
+struct NormalizedText {
+    text: String,
+    original_offsets: Vec<usize>,
+}
+
+fn push_mapped_char(
+    normalized: &mut String,
+    offsets: &mut Vec<usize>,
+    ch: char,
+    original_start: usize,
+    original_end: usize,
+) {
+    let mut buffer = [0u8; 4];
+    let encoded = ch.encode_utf8(&mut buffer);
+
+    normalized.push(ch);
+
+    for index in 1..=encoded.len() {
+        if index == encoded.len() {
+            offsets.push(original_end);
+        } else {
+            offsets.push(original_start);
+        }
+    }
+}
+
+fn normalize_text_with_offsets(original: &str) -> NormalizedText {
+    let bytes = original.as_bytes();
+    let mut normalized = String::new();
+    let mut offsets = vec![0usize];
+
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            if index + 1 < bytes.len() && bytes[index + 1] == b'\n' {
+                push_mapped_char(&mut normalized, &mut offsets, '\n', index, index + 2);
+                index += 2;
+            } else {
+                push_mapped_char(&mut normalized, &mut offsets, '\n', index, index + 1);
+                index += 1;
+            }
+            continue;
+        }
+
+        let ch = original[index..]
+            .chars()
+            .next()
+            .expect("valid UTF-8 text should yield a character");
+        let end = index + ch.len_utf8();
+
+        push_mapped_char(&mut normalized, &mut offsets, ch, index, end);
+        index = end;
+    }
+
+    NormalizedText {
+        text: normalized,
+        original_offsets: offsets,
+    }
+}
+
+fn replace_mapped_ranges(original: &str, ranges: &[(usize, usize)], replacement: &str) -> String {
+    let mut updated = String::new();
+    let mut cursor = 0usize;
+
+    for &(start, end) in ranges {
+        updated.push_str(&original[cursor..start]);
+        updated.push_str(replacement);
+        cursor = end;
+    }
+
+    updated.push_str(&original[cursor..]);
+    updated
+}
+
+fn replace_text_preserving_style(
+    original: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> io::Result<String> {
+    if old_string.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "old_string must not be empty",
+        ));
+    }
+
+    let replacement = normalize_line_endings_to(new_string, detect_line_ending_style(original));
+
+    if original.contains(old_string) {
+        let updated = if replace_all {
+            original.replace(old_string, &replacement)
+        } else {
+            original.replacen(old_string, &replacement, 1)
+        };
+
+        return Ok(updated);
+    }
+
+    let normalized_original = normalize_text_with_offsets(original);
+    let normalized_old = normalize_line_endings_to(old_string, "\n");
+
+    let mut ranges = Vec::new();
+
+    if replace_all {
+        let mut search_start = 0usize;
+
+        while let Some(relative_start) = normalized_original.text[search_start..].find(&normalized_old)
+        {
+            let normalized_start = search_start + relative_start;
+            let normalized_end = normalized_start + normalized_old.len();
+
+            ranges.push((
+                normalized_original.original_offsets[normalized_start],
+                normalized_original.original_offsets[normalized_end],
+            ));
+
+            search_start = normalized_end;
+        }
+    } else if let Some(normalized_start) = normalized_original.text.find(&normalized_old) {
+        let normalized_end = normalized_start + normalized_old.len();
+
+        ranges.push((
+            normalized_original.original_offsets[normalized_start],
+            normalized_original.original_offsets[normalized_end],
+        ));
+    }
+
+    if ranges.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "old_string not found in file, including CRLF/LF-compatible matching",
+        ));
+    }
+
+    Ok(replace_mapped_ranges(original, &ranges, &replacement))
+}
+
+
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            let extension = extension.to_ascii_lowercase();
+            extension == "md" || extension == "markdown"
+        })
+        .unwrap_or(false)
+}
+
+fn escape_html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn build_ai_annotation_block(annotation: &str, newline: &str) -> io::Result<String> {
+    let annotation = annotation.trim();
+
+    if annotation.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "annotation must not be empty",
+        ));
+    }
+
+    let annotation = normalize_line_endings_to(annotation, "\n");
+
+    let mut block = String::new();
+
+    for line in annotation.lines() {
+        let cleaned_line = line
+            .trim()
+            .trim_start_matches('>')
+            .trim()
+            .trim_start_matches("AI 批注：")
+            .trim_start_matches("AI批注：")
+            .trim_start_matches("批注：")
+            .trim();
+
+        if cleaned_line.is_empty() {
+            block.push_str(newline);
+        } else {
+            block.push_str("<mark style=\"background:#d3f8b6;\">");
+            block.push_str(&escape_html_text(cleaned_line));
+            block.push_str("</mark>");
+            block.push_str(newline);
+        }
+    }
+
+    Ok(block)
+}
+
+fn normalize_annotation_position(
+    position: Option<&str>,
+    has_anchor: bool,
+) -> io::Result<&'static str> {
+    let position = position.unwrap_or(if has_anchor { "after" } else { "end" });
+
+    match position {
+        "before" => Ok("before"),
+        "after" => Ok("after"),
+        "end" => Ok("end"),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "position must be one of: before, after, end",
+        )),
+    }
+}
+
+fn find_unique_anchor_range(original: &str, anchor: &str) -> io::Result<(usize, usize)> {
+    if anchor.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "anchor must not be empty",
+        ));
+    }
+
+    let exact_matches: Vec<(usize, &str)> = original.match_indices(anchor).collect();
+
+    if exact_matches.len() == 1 {
+        let start = exact_matches[0].0;
+        return Ok((start, start + anchor.len()));
+    }
+
+    if exact_matches.len() > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "anchor matched multiple locations in the Markdown file",
+        ));
+    }
+
+    let normalized_original = normalize_text_with_offsets(original);
+    let normalized_anchor = normalize_line_endings_to(anchor, "\n");
+
+    let mut ranges = Vec::new();
+
+    for (normalized_start, _) in normalized_original.text.match_indices(&normalized_anchor) {
+        let normalized_end = normalized_start + normalized_anchor.len();
+
+        ranges.push((
+            normalized_original.original_offsets[normalized_start],
+            normalized_original.original_offsets[normalized_end],
+        ));
+    }
+
+    ranges.sort_unstable();
+    ranges.dedup();
+
+    match ranges.len() {
+        1 => Ok(ranges[0]),
+        0 => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "anchor not found in Markdown file",
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "anchor matched multiple locations in the Markdown file",
+        )),
+    }
+}
+
+fn line_start_for_index(text: &str, index: usize) -> usize {
+    text[..index].rfind('\n').map_or(0, |position| position + 1)
+}
+
+fn line_end_for_index(text: &str, index: usize) -> usize {
+    text[index..]
+        .find('\n')
+        .map_or(text.len(), |position| index + position + 1)
+}
+
+fn insert_annotation_block(
+    original: &str,
+    insert_at: usize,
+    block: &str,
+    newline: &str,
+) -> String {
+    let mut insertion = String::new();
+
+    if insert_at > 0 {
+        let before = &original[..insert_at];
+
+        if before.ends_with("\r\n\r\n") || before.ends_with("\n\n") {
+            // Already separated.
+        } else if before.ends_with('\n') {
+            insertion.push_str(newline);
+        } else {
+            insertion.push_str(newline);
+            insertion.push_str(newline);
+        }
+    }
+
+    insertion.push_str(block);
+
+    if insert_at < original.len() && !insertion.ends_with(newline) {
+        insertion.push_str(newline);
+    }
+
+    let mut updated = String::new();
+    updated.push_str(&original[..insert_at]);
+    updated.push_str(&insertion);
+    updated.push_str(&original[insert_at..]);
+    updated
+}
+
 /// Replaces a file's contents and returns patch metadata.
 pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     if content.len() > MAX_WRITE_SIZE {
@@ -274,10 +636,24 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
 
     let absolute_path = normalize_path_allow_missing(path)?;
     let original_file = fs::read_to_string(&absolute_path).ok();
+    let styled_content = preserve_existing_text_style(content, original_file.as_deref());
+
+    if styled_content.len() > MAX_WRITE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "styled content is too large ({} bytes, max {} bytes)",
+                styled_content.len(),
+                MAX_WRITE_SIZE
+            ),
+        ));
+    }
+
     if let Some(parent) = absolute_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&absolute_path, content)?;
+
+    fs::write(&absolute_path, &styled_content)?;
 
     Ok(WriteFileOutput {
         kind: if original_file.is_some() {
@@ -286,8 +662,8 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
             String::from("create")
         },
         file_path: absolute_path.to_string_lossy().into_owned(),
-        content: content.to_owned(),
-        structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
+        content: styled_content.clone(),
+        structured_patch: make_patch(original_file.as_deref().unwrap_or(""), &styled_content),
         original_file,
         git_diff: None,
     })
@@ -302,24 +678,21 @@ pub fn edit_file(
 ) -> io::Result<EditFileOutput> {
     let absolute_path = normalize_path(path)?;
     let original_file = fs::read_to_string(&absolute_path)?;
+
     if old_string == new_string {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "old_string and new_string must differ",
         ));
     }
-    if !original_file.contains(old_string) {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "old_string not found in file",
-        ));
-    }
 
-    let updated = if replace_all {
-        original_file.replace(old_string, new_string)
-    } else {
-        original_file.replacen(old_string, new_string, 1)
-    };
+    let updated = replace_text_preserving_style(
+        &original_file,
+        old_string,
+        new_string,
+        replace_all,
+    )?;
+
     fs::write(&absolute_path, &updated)?;
 
     Ok(EditFileOutput {
@@ -333,6 +706,73 @@ pub fn edit_file(
         git_diff: None,
     })
 }
+
+/// Inserts an AI annotation block into a Markdown file without modifying existing text.
+pub fn annotate_markdown(
+    path: &str,
+    annotation: &str,
+    anchor: Option<&str>,
+    position: Option<&str>,
+) -> io::Result<AnnotateMarkdownOutput> {
+    let absolute_path = normalize_path(path)?;
+
+    if !is_markdown_path(&absolute_path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "annotate_markdown only supports .md and .markdown files",
+        ));
+    }
+
+    let original_file = fs::read_to_string(&absolute_path)?;
+    let newline = detect_line_ending_style(&original_file);
+    let position = normalize_annotation_position(position, anchor.is_some())?;
+    let annotation_block = build_ai_annotation_block(annotation, newline)?;
+
+    let insert_at = if position == "end" {
+        original_file.len()
+    } else {
+        let anchor = anchor.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "anchor is required when position is before or after",
+            )
+        })?;
+
+        let (anchor_start, anchor_end) = find_unique_anchor_range(&original_file, anchor)?;
+
+        match position {
+            "before" => line_start_for_index(&original_file, anchor_start),
+            "after" => line_end_for_index(&original_file, anchor_end),
+            _ => unreachable!("position has already been normalized"),
+        }
+    };
+
+    let updated = insert_annotation_block(&original_file, insert_at, &annotation_block, newline);
+
+    if updated.len() > MAX_WRITE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "annotated file is too large ({} bytes, max {} bytes)",
+                updated.len(),
+                MAX_WRITE_SIZE
+            ),
+        ));
+    }
+
+    fs::write(&absolute_path, &updated)?;
+
+    Ok(AnnotateMarkdownOutput {
+        file_path: absolute_path.to_string_lossy().into_owned(),
+        annotation: annotation.to_owned(),
+        anchor: anchor.map(ToOwned::to_owned),
+        position: position.to_owned(),
+        original_file: original_file.clone(),
+        structured_patch: make_patch(&original_file, &updated),
+        git_diff: None,
+    })
+}
+
 
 /// Expands a glob pattern and returns matching filenames.
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
@@ -655,19 +1095,67 @@ fn apply_limit<T>(
 }
 
 fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
+    if original == updated {
+        return Vec::new();
+    }
+
+    let original_lines: Vec<&str> = original.lines().collect();
+    let updated_lines: Vec<&str> = updated.lines().collect();
+
+    let mut prefix_len = 0usize;
+    while prefix_len < original_lines.len()
+        && prefix_len < updated_lines.len()
+        && original_lines[prefix_len] == updated_lines[prefix_len]
+    {
+        prefix_len += 1;
+    }
+
+    let mut original_suffix_start = original_lines.len();
+    let mut updated_suffix_start = updated_lines.len();
+
+    while original_suffix_start > prefix_len
+        && updated_suffix_start > prefix_len
+        && original_lines[original_suffix_start - 1] == updated_lines[updated_suffix_start - 1]
+    {
+        original_suffix_start -= 1;
+        updated_suffix_start -= 1;
+    }
+
+    const CONTEXT_LINES: usize = 3;
+
+    let old_hunk_start = prefix_len.saturating_sub(CONTEXT_LINES);
+    let new_hunk_start = prefix_len.saturating_sub(CONTEXT_LINES);
+
+    let old_hunk_end = original_suffix_start
+        .saturating_add(CONTEXT_LINES)
+        .min(original_lines.len());
+    let new_hunk_end = updated_suffix_start
+        .saturating_add(CONTEXT_LINES)
+        .min(updated_lines.len());
+
     let mut lines = Vec::new();
-    for line in original.lines() {
+
+    for line in &original_lines[old_hunk_start..prefix_len] {
+        lines.push(format!(" {line}"));
+    }
+
+    for line in &original_lines[prefix_len..original_suffix_start] {
         lines.push(format!("-{line}"));
     }
-    for line in updated.lines() {
+
+    for line in &updated_lines[prefix_len..updated_suffix_start] {
         lines.push(format!("+{line}"));
     }
 
+    for line in &original_lines[original_suffix_start..old_hunk_end] {
+        lines.push(format!(" {line}"));
+    }
+
     vec![StructuredPatchHunk {
-        old_start: 1,
-        old_lines: original.lines().count(),
-        new_start: 1,
-        new_lines: updated.lines().count(),
+        old_start: old_hunk_start + 1,
+        old_lines: old_hunk_end.saturating_sub(old_hunk_start),
+        new_start: new_hunk_start + 1,
+        new_lines: new_hunk_end.saturating_sub(new_hunk_start),
         lines,
     }]
 }
@@ -745,6 +1233,24 @@ pub fn edit_file_in_workspace(
     validate_workspace_boundary(&absolute_path, &canonical_root)?;
     edit_file(path, old_string, new_string, replace_all)
 }
+
+/// Insert an AI annotation block into a Markdown file with workspace boundary enforcement.
+#[allow(dead_code)]
+pub fn annotate_markdown_in_workspace(
+    path: &str,
+    annotation: &str,
+    anchor: Option<&str>,
+    position: Option<&str>,
+    workspace_root: &Path,
+) -> io::Result<AnnotateMarkdownOutput> {
+    let absolute_path = normalize_path(path)?;
+    let canonical_root = canonicalize_workspace_root(workspace_root);
+
+    validate_workspace_boundary(&absolute_path, &canonical_root)?;
+
+    annotate_markdown(path, annotation, anchor, position)
+}
+
 
 /// Expand a glob pattern with workspace boundary enforcement.
 #[allow(dead_code)]

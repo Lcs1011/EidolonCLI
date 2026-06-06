@@ -15,7 +15,8 @@ use api::{
 use plugins::PluginTool;
 use reqwest::blocking::Client;
 use runtime::{
-    check_freshness, dedupe_superseded_commit_events, edit_file_in_workspace, execute_bash,
+    annotate_markdown_in_workspace, check_freshness, dedupe_superseded_commit_events,
+    edit_file_in_workspace, execute_bash,
     glob_search_in_workspace, grep_search_in_workspace, load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
@@ -473,6 +474,7 @@ fn format_allowed_tool_aliases(aliases: &BTreeMap<String, String>) -> String {
 fn permission_mode_from_plugin(value: &str) -> Result<PermissionMode, String> {
     match value {
         "read-only" => Ok(PermissionMode::ReadOnly),
+        "review-write" => Ok(PermissionMode::ReviewWrite),
         "workspace-write" => Ok(PermissionMode::WorkspaceWrite),
         "danger-full-access" => Ok(PermissionMode::DangerFullAccess),
         other => Err(format!("unsupported plugin permission: {other}")),
@@ -527,6 +529,28 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "annotate_markdown",
+            description: "Insert highlighted AI annotation text into Markdown files. Use this tool when the AI agent needs to add comments, suggestions, review notes, or annotations to Markdown document content. This tool only inserts highlighted annotation text and cannot delete, rewrite, or modify the user's original text. The annotation input should be plain note text only; do not include blockquote markers, titles, HTML, or Markdown wrapper syntax.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "annotation": {
+                        "type": "string",
+                        "description": "Plain AI annotation text only. Do not include blockquote markers, titles, HTML, or Markdown wrapper syntax."
+                    },
+                    "anchor": { "type": "string" },
+                    "position": {
+                        "type": "string",
+                        "enum": ["before", "after", "end"]
+                    }
+                },
+                "required": ["path", "annotation"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReviewWrite,
         },
         ToolSpec {
             name: "glob_search",
@@ -1354,6 +1378,14 @@ fn execute_tool_with_enforcer(
             maybe_enforce_permission_check_with_mode(enforcer, name, input, required_mode)?;
             run_edit_file(file_input)
         }
+    
+        "annotate_markdown" => {
+            let file_input: AnnotateMarkdownInput = from_value(input)?;
+            let required_mode = classify_annotate_markdown_permission(&file_input.path);
+            maybe_enforce_permission_check_with_mode(enforcer, name, input, required_mode)?;
+            run_annotate_markdown(file_input)
+        }
+    
         "glob_search" => {
             let glob_input: GlobSearchInputValue = from_value(input)?;
             let required_mode = classify_glob_permission(&glob_input);
@@ -2435,6 +2467,22 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn run_annotate_markdown(input: AnnotateMarkdownInput) -> Result<String, String> {
+    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+
+    to_pretty_json(
+        annotate_markdown_in_workspace(
+            &input.path,
+            &input.annotation,
+            input.anchor.as_deref(),
+            input.position.as_deref(),
+            &workspace,
+        )
+        .map_err(io_to_string)?,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
     let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
     to_pretty_json(
@@ -2510,6 +2558,14 @@ fn run_repl(input: ReplInput) -> Result<String, String> {
 fn classify_file_path_permission(path: &str, allow_missing: bool) -> PermissionMode {
     if path_within_current_workspace(path, allow_missing) {
         PermissionMode::WorkspaceWrite
+    } else {
+        PermissionMode::DangerFullAccess
+    }
+}
+
+fn classify_annotate_markdown_permission(path: &str) -> PermissionMode {
+    if path_within_current_workspace(path, false) {
+        PermissionMode::ReviewWrite
     } else {
         PermissionMode::DangerFullAccess
     }
@@ -2736,6 +2792,14 @@ struct EditFileInput {
     old_string: String,
     new_string: String,
     replace_all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnnotateMarkdownInput {
+    path: String,
+    annotation: String,
+    anchor: Option<String>,
+    position: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4261,6 +4325,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "read_file",
             "write_file",
             "edit_file",
+            "annotate_markdown",
             "glob_search",
             "grep_search",
             "ToolSearch",
@@ -4269,6 +4334,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "read_file",
             "write_file",
             "edit_file",
+            "annotate_markdown",
             "glob_search",
             "grep_search",
             "WebFetch",

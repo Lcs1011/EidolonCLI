@@ -1043,6 +1043,11 @@ fn system_prompt(
             "You are a read-only coding assistant. Workspace root: {root_s}. \
              Tools: `read_file`, `list_dir`, `glob_workspace`, `grep_workspace` / `grep_search` (literal substring){git_blurb}{rag_blurb}. Paths relative; use `/`; no `..`."
         ),
+        PermissionMode::ReviewWrite => format!(
+            "You are a coding assistant in review-write permission mode (workspace root: {root_s}). \
+             Read/list/glob/grep{git_blurb}{rag_blurb} tools are available. \
+             Markdown annotation-style writes may be allowed, but normal file writes remain gated and require higher permission or explicit approval depending on the harness."
+        ),
         PermissionMode::WorkspaceWrite => format!(
             "You are a coding assistant with read/list/glob/grep/write{git_blurb}{rag_blurb}. Workspace root: {root_s}. \
              Relative paths only; no `..`."

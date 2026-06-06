@@ -51,6 +51,7 @@ pub enum ConfigSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedPermissionMode {
     ReadOnly,
+    ReviewWrite,
     WorkspaceWrite,
     DangerFullAccess,
 }
@@ -1993,6 +1994,7 @@ fn parse_permission_mode_label(
 ) -> Result<ResolvedPermissionMode, ConfigError> {
     match mode {
         "default" | "plan" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
+        "reviewWrite" | "review-write" => Ok(ResolvedPermissionMode::ReviewWrite),
         "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
         "dontAsk" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
         other => Err(ConfigError::Parse(format!(
@@ -3505,6 +3507,10 @@ mod tests {
         assert_eq!(
             parse_permission_mode_label("plan", "test").expect("plan should resolve"),
             ResolvedPermissionMode::ReadOnly
+        );
+        assert_eq!(
+            parse_permission_mode_label("review-write", "test").expect("review-write should resolve"),
+            ResolvedPermissionMode::ReviewWrite
         );
         assert_eq!(
             parse_permission_mode_label("acceptEdits", "test").expect("acceptEdits should resolve"),

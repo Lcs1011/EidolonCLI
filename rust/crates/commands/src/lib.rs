@@ -97,7 +97,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "permissions",
         aliases: &[],
         summary: "Show or switch the active permission mode",
-        argument_hint: Some("[read-only|workspace-write|danger-full-access]"),
+        argument_hint: Some("[read-only|review-write|workspace-write|danger-full-access]"),
         resume_supported: false,
     },
     SlashCommandSpec {
@@ -1535,21 +1535,21 @@ fn parse_permissions_mode(args: &[&str]) -> Result<Option<String>, SlashCommandP
     let mode = optional_single_arg(
         "permissions",
         args,
-        "[read-only|workspace-write|danger-full-access]",
+        "[read-only|review-write|workspace-write|danger-full-access]",
     )?;
     if let Some(mode) = mode {
         if matches!(
             mode.as_str(),
-            "read-only" | "workspace-write" | "danger-full-access"
+            "read-only" | "review-write" | "workspace-write" | "danger-full-access"
         ) {
             return Ok(Some(mode));
         }
         return Err(command_error(
             &format!(
-                "Unsupported /permissions mode '{mode}'. Use read-only, workspace-write, or danger-full-access."
+                "Unsupported /permissions mode '{mode}'. Use read-only, review-write, workspace-write, or danger-full-access."
             ),
             "permissions",
-            "/permissions [read-only|workspace-write|danger-full-access]",
+            "/permissions [read-only|review-write|workspace-write|danger-full-access]",
         ));
     }
 
@@ -5788,10 +5788,10 @@ mod tests {
 
         // then
         assert!(error.contains(
-            "Unsupported /permissions mode 'admin'. Use read-only, workspace-write, or danger-full-access."
+            "Unsupported /permissions mode 'admin'. Use read-only, review-write, workspace-write, or danger-full-access."
         ));
         assert!(error.contains(
-            "  Usage            /permissions [read-only|workspace-write|danger-full-access]"
+            "  Usage            /permissions [read-only|review-write|workspace-write|danger-full-access]"
         ));
     }
 
@@ -5973,7 +5973,7 @@ mod tests {
         assert!(help.contains("/teleport <symbol-or-path>"));
         assert!(help.contains("/debug-tool-call"));
         assert!(help.contains("/model [model]"));
-        assert!(help.contains("/permissions [read-only|workspace-write|danger-full-access]"));
+        assert!(help.contains("/permissions [read-only|review-write|workspace-write|danger-full-access]"));
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <session-path>"));

@@ -8,6 +8,7 @@ use crate::config::RuntimePermissionRuleConfig;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PermissionMode {
     ReadOnly,
+    ReviewWrite,
     WorkspaceWrite,
     DangerFullAccess,
     Prompt,
@@ -19,6 +20,7 @@ impl PermissionMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read-only",
+            Self::ReviewWrite => "review-write",
             Self::WorkspaceWrite => "workspace-write",
             Self::DangerFullAccess => "danger-full-access",
             Self::Prompt => "prompt",
@@ -284,6 +286,9 @@ impl PermissionPolicy {
         }
 
         if current_mode == PermissionMode::Prompt
+            || (current_mode == PermissionMode::ReviewWrite
+                && (required_mode == PermissionMode::WorkspaceWrite
+                    || required_mode == PermissionMode::DangerFullAccess))
             || (current_mode == PermissionMode::WorkspaceWrite
                 && required_mode == PermissionMode::DangerFullAccess)
         {

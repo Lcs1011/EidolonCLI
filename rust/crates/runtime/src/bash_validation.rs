@@ -284,6 +284,7 @@ pub fn check_destructive(command: &str) -> ValidationResult {
 pub fn validate_mode(command: &str, mode: PermissionMode) -> ValidationResult {
     match mode {
         PermissionMode::ReadOnly => validate_read_only(command, mode),
+        PermissionMode::ReviewWrite => validate_read_only(command, mode),
         PermissionMode::WorkspaceWrite => {
             // In workspace-write mode, check for system-level destructive
             // operations that go beyond workspace scope.

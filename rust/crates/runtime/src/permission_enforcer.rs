@@ -115,6 +115,12 @@ impl PermissionEnforcer {
                 required_mode: PermissionMode::WorkspaceWrite.as_str().to_owned(),
                 reason: format!("file writes are not allowed in '{}' mode", mode.as_str()),
             },
+            PermissionMode::ReviewWrite => EnforcementResult::Denied {
+                tool: "write_file".to_owned(),
+                active_mode: mode.as_str().to_owned(),
+                required_mode: PermissionMode::WorkspaceWrite.as_str().to_owned(),
+                reason: "file write requires confirmation in review-write mode".to_owned(),
+            },
             PermissionMode::WorkspaceWrite => {
                 if is_within_workspace(path, workspace_root) {
                     EnforcementResult::Allowed
@@ -146,7 +152,7 @@ impl PermissionEnforcer {
         let mode = self.policy.active_mode();
 
         match mode {
-            PermissionMode::ReadOnly => {
+            PermissionMode::ReadOnly | PermissionMode::ReviewWrite => {
                 if is_read_only_command(command) {
                     EnforcementResult::Allowed
                 } else {
@@ -604,6 +610,7 @@ mod tests {
         // given
         let modes = [
             PermissionMode::ReadOnly,
+            PermissionMode::ReviewWrite,
             PermissionMode::WorkspaceWrite,
             PermissionMode::DangerFullAccess,
             PermissionMode::Prompt,

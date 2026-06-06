@@ -1568,7 +1568,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             "--permission-mode" => {
                 let value = args
                     .get(index + 1)
-                    .ok_or_else(|| "missing_flag_value: missing value for --permission-mode.\nUsage: --permission-mode read-only|workspace-write|danger-full-access".to_string())?;
+                    .ok_or_else(|| "missing_flag_value: missing value for --permission-mode.\nUsage: --permission-mode read-only|review-write|workspace-write|danger-full-access".to_string())?;
                 // #468: track duplicate --permission-mode flags
                 if permission_mode_override.is_some() {
                     push_duplicate_flag("--permission-mode (overwriting previous value)");
@@ -2017,7 +2017,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         // forms here and return a structured guidance error so no network
         // call or session is created.
         "permissions" => Err(
-            "`claw permissions` is a slash command. Start `claw` and run `/permissions` inside the REPL.\n  Usage  /permissions [read-only|workspace-write|danger-full-access]"
+            "`claw permissions` is a slash command. Start `claw` and run `/permissions` inside the REPL.\n  Usage  /permissions [read-only|review-write|workspace-write|danger-full-access]"
                 .to_string(),
         ),
         // #767: `claw session bogus` bypassed parse_single_word_command_alias (rest.len()>1),
@@ -3021,7 +3021,7 @@ fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
     normalize_permission_mode(value)
         .ok_or_else(|| {
             format!(
-                "invalid_permission_mode: unsupported permission mode '{value}'.\nUsage: --permission-mode read-only|workspace-write|danger-full-access"
+                "invalid_permission_mode: unsupported permission mode '{value}'.\nUsage: --permission-mode read-only|review-write|workspace-write|danger-full-access"
             )
         })
         .map(permission_mode_from_label)
@@ -3030,6 +3030,7 @@ fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
 fn permission_mode_from_label(mode: &str) -> PermissionMode {
     match mode {
         "read-only" => PermissionMode::ReadOnly,
+        "review-write" => PermissionMode::ReviewWrite,
         "workspace-write" => PermissionMode::WorkspaceWrite,
         "danger-full-access" => PermissionMode::DangerFullAccess,
         other => panic!("unsupported permission mode label: {other}"),
@@ -3039,6 +3040,7 @@ fn permission_mode_from_label(mode: &str) -> PermissionMode {
 fn permission_mode_from_resolved(mode: ResolvedPermissionMode) -> PermissionMode {
     match mode {
         ResolvedPermissionMode::ReadOnly => PermissionMode::ReadOnly,
+        ResolvedPermissionMode::ReviewWrite => PermissionMode::ReviewWrite,
         ResolvedPermissionMode::WorkspaceWrite => PermissionMode::WorkspaceWrite,
         ResolvedPermissionMode::DangerFullAccess => PermissionMode::DangerFullAccess,
     }
@@ -4223,7 +4225,7 @@ fn check_permission_health(permission_mode: PermissionModeProvenance) -> Diagnos
     .with_hint(if warning {
         "Use the workspace-write default, or pass --permission-mode danger-full-access / --dangerously-skip-permissions only when full filesystem, network, and command access is intentional."
     } else {
-        "Use --permission-mode read-only|workspace-write|danger-full-access to make the runtime permission boundary explicit."
+        "Use --permission-mode read-only|review-write|workspace-write|danger-full-access to make the runtime permission boundary explicit."
     })
     .with_data(Map::from_iter([
         ("mode".to_string(), json!(mode)),
@@ -6072,6 +6074,11 @@ fn format_model_switch_report(previous: &str, next: &str, message_count: usize) 
 fn format_permissions_report(mode: &str) -> String {
     let modes = [
         ("read-only", "Read/search tools only", mode == "read-only"),
+        (
+            "review-write",
+            "Read/search plus AI Markdown annotations; ask before normal file edits",
+            mode == "review-write",
+        ),
         (
             "workspace-write",
             "Edit files inside the workspace",
@@ -8369,7 +8376,7 @@ impl LiveCli {
 
         let normalized = normalize_permission_mode(&mode).ok_or_else(|| {
             format!(
-                "invalid_flag_value: unsupported permission mode '{mode}'.\nUsage: --permission-mode read-only|workspace-write|danger-full-access"
+                "invalid_flag_value: unsupported permission mode '{mode}'.\nUsage: --permission-mode read-only|review-write|workspace-write|danger-full-access"
             )
         })?;
 
@@ -11032,6 +11039,7 @@ fn init_json_value(report: &crate::init::InitReport, message: &str) -> serde_jso
 fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
     match mode.trim() {
         "default" | "plan" | "read-only" => Some("read-only"),
+        "reviewWrite" | "review-write" => Some("review-write"),
         "acceptEdits" | "auto" | "workspace-write" => Some("workspace-write"),
         "dontAsk" | "bypassPermissions" | "dangerFullAccess" | "danger-full-access" => {
             Some("danger-full-access")
@@ -13210,6 +13218,7 @@ fn slash_command_completion_candidates_with_sessions(
         "/model haiku",
         "/permissions ",
         "/permissions read-only",
+        "/permissions review-write",
         "/permissions workspace-write",
         "/permissions danger-full-access",
         "/plugin list",
@@ -14103,7 +14112,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  --permission-mode MODE     Set read-only, workspace-write, or danger-full-access"
+        "  --permission-mode MODE     Set read-only, review-write, workspace-write, or danger-full-access"
     )?;
     writeln!(
         out,
@@ -16265,7 +16274,7 @@ mod tests {
             "missing_flag_value"
         );
         assert_eq!(
-            classify_error_kind("invalid_permission_mode: unsupported permission mode 'bogus'.\nUsage: --permission-mode read-only|workspace-write|danger-full-access"),
+            classify_error_kind("invalid_permission_mode: unsupported permission mode 'bogus'.\nUsage: --permission-mode read-only|review-write|workspace-write|danger-full-access"),
             "invalid_permission_mode"
         );
         assert_eq!(
@@ -17239,7 +17248,7 @@ mod tests {
         assert!(help.contains("/status"));
         assert!(help.contains("/sandbox"));
         assert!(help.contains("/model [model]"));
-        assert!(help.contains("/permissions [read-only|workspace-write|danger-full-access]"));
+        assert!(help.contains("/permissions [read-only|review-write|workspace-write|danger-full-access]"));
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <session-path>"));
@@ -17458,6 +17467,7 @@ mod tests {
         assert!(report.contains("Active mode      workspace-write"));
         assert!(report.contains("Modes"));
         assert!(report.contains("read-only          ○ available Read/search tools only"));
+        assert!(report.contains("review-write       ○ available Read/search plus AI Markdown annotations; ask before normal file edits"));
         assert!(report.contains("workspace-write    ● current   Edit files inside the workspace"));
         assert!(report.contains("danger-full-access ○ available Unrestricted tool access"));
     }
@@ -18201,6 +18211,10 @@ UU conflicted.rs",
     #[test]
     fn normalizes_supported_permission_modes() {
         assert_eq!(normalize_permission_mode("read-only"), Some("read-only"));
+        assert_eq!(
+            normalize_permission_mode("review-write"),
+            Some("review-write")
+        );
         assert_eq!(
             normalize_permission_mode("workspace-write"),
             Some("workspace-write")
