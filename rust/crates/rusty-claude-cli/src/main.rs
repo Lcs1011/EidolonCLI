@@ -7601,6 +7601,61 @@ impl HookAbortMonitor {
     }
 }
 
+fn clean_windows_extended_path_string(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+
+    value.to_string()
+}
+
+fn clean_path_for_display(path: &Path) -> String {
+    clean_windows_extended_path_string(&path.display().to_string())
+}
+
+fn clean_relative_path_for_display(path: &Path, base: &Path) -> String {
+    let path_clean = clean_path_for_display(path);
+    let base_clean = clean_path_for_display(base);
+
+    #[cfg(windows)]
+    {
+        let path_norm = path_clean.replace('/', "\\");
+        let base_norm = base_clean.replace('/', "\\");
+        let path_key = path_norm.to_ascii_lowercase();
+        let base_key = base_norm.to_ascii_lowercase();
+
+        let base_norm_no_separator = base_norm.trim_end_matches('\\');
+        let base_key_no_separator = base_key.trim_end_matches('\\');
+
+        if path_key == base_key_no_separator {
+            return ".".to_string();
+        }
+
+        let base_key_with_separator = format!("{base_key_no_separator}\\");
+
+        if path_key.starts_with(&base_key_with_separator) {
+            return path_norm[base_norm_no_separator.len()..]
+                .trim_start_matches('\\')
+                .to_string();
+        }
+
+        path_clean
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.strip_prefix(base)
+            .map_or(path_clean, |relative| relative.display().to_string())
+    }
+}
+
 impl LiveCli {
     fn new(
         model: String,
@@ -7642,9 +7697,10 @@ impl LiveCli {
     }
 
     fn startup_banner(&self) -> String {
-        let cwd = env::current_dir().map_or_else(
-            |_| "<unknown>".to_string(),
-            |path| path.display().to_string(),
+        let cwd_path = env::current_dir().ok();
+        let cwd = cwd_path.as_ref().map_or_else(
+            || "<unknown>".to_string(),
+            |path| clean_path_for_display(path),
         );
         let status = status_context(None).ok();
         let git_branch = status
@@ -7655,9 +7711,9 @@ impl LiveCli {
             || "unknown".to_string(),
             |context| context.git_summary.headline(),
         );
-        let session_path = self.session.path.strip_prefix(Path::new(&cwd)).map_or_else(
-            |_| self.session.path.display().to_string(),
-            |path| path.display().to_string(),
+        let session_path = cwd_path.as_ref().map_or_else(
+            || clean_path_for_display(&self.session.path),
+            |cwd_path| clean_relative_path_for_display(&self.session.path, cwd_path),
         );
         format!(
             "\x1b[38;5;214m\
