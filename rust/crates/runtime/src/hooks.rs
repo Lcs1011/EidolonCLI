@@ -842,6 +842,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn allows_exit_code_zero_and_captures_stdout() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -855,6 +856,7 @@ mod tests {
         assert_eq!(result, HookRunResult::allow(vec!["pre ok".to_string()]));
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn object_style_hook_matchers_filter_runtime_execution() {
         let runner = HookRunner::new(RuntimeHookConfig::from_hook_commands(
@@ -886,6 +888,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn denies_exit_code_two() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -922,6 +925,7 @@ mod tests {
             .any(|message| message.contains("warning hook")));
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn parses_pre_hook_permission_override_and_updated_input() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -943,6 +947,7 @@ mod tests {
         assert!(result.messages().iter().any(|message| message == "updated"));
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn runs_post_tool_use_failure_hooks() {
         // given
@@ -961,6 +966,7 @@ mod tests {
         assert_eq!(result.messages(), &["failure hook ran".to_string()]);
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn stops_running_failure_hooks_after_failure() {
         // given
@@ -989,6 +995,7 @@ mod tests {
             .any(|message| message == "later failure hook"));
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn executes_hooks_in_configured_order() {
         // given
@@ -1050,6 +1057,7 @@ mod tests {
         ));
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn stops_running_hooks_after_failure() {
         // given
@@ -1074,6 +1082,7 @@ mod tests {
         assert!(!result.messages().iter().any(|message| message == "later"));
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn malformed_nonempty_hook_output_reports_explicit_diagnostic_with_previews() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
@@ -1099,6 +1108,7 @@ mod tests {
         assert!(rendered.contains("stderr_preview=stderr warning"));
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn abort_signal_cancels_long_running_hook_and_reports_progress() {
         let runner = HookRunner::new(RuntimeHookConfig::new(

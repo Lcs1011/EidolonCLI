@@ -1205,6 +1205,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn appends_post_tool_hook_feedback_to_tool_result() {
         struct TwoCallApiClient {

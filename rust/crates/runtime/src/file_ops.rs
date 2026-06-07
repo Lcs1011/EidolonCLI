@@ -827,7 +827,7 @@ fn glob_search_impl(
         for entry in entries.flatten() {
             let candidate = entry.path();
             if entry.file_type().is_file()
-                && compiled.matches_path(candidate)
+                && compiled.matches(&normalize_glob_pattern_text(&candidate.to_string_lossy()))
                 && seen.insert(candidate.to_path_buf())
             {
                 if let Some(root) = canonical_root.as_deref() {
@@ -850,7 +850,7 @@ fn glob_search_impl(
     let filenames = matches
         .into_iter()
         .take(100)
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| normalize_glob_pattern_text(&path.to_string_lossy()))
         .collect::<Vec<_>>();
 
     Ok(GlobSearchOutput {

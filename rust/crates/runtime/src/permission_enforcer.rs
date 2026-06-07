@@ -251,12 +251,6 @@ fn is_within_workspace(path: &str, workspace_root: &str) -> bool {
 /// result can never be a prefix-match for a deeper workspace root.
 fn lexically_normalize(path: &str) -> String {
     let normalized = path.replace('\\', "/");
-    let is_absolute = normalized.starts_with('/')
-        || normalized
-            .as_bytes()
-            .get(1)
-            .is_some_and(|byte| *byte == b':');
-
     let mut stack: Vec<&str> = Vec::new();
 
     for component in normalized.split('/') {

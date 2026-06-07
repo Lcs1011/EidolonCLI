@@ -361,6 +361,7 @@ mod tests {
     use super::{execute_bash, BashCommandInput};
     use crate::sandbox::FilesystemIsolationMode;
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn executes_simple_command() {
         let output = execute_bash(BashCommandInput {
@@ -381,6 +382,7 @@ mod tests {
         assert!(output.sandbox_status.is_some());
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn disables_sandbox_when_requested() {
         let output = execute_bash(BashCommandInput {
@@ -399,6 +401,7 @@ mod tests {
         assert!(!output.sandbox_status.expect("sandbox status").enabled);
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn timed_out_test_command_is_classified_as_hung_test_with_provenance() {
         let output = execute_bash(BashCommandInput {
@@ -424,6 +427,7 @@ mod tests {
         assert_eq!(structured[0]["data"]["provenance"], "bash.timeout");
     }
 
+    #[cfg_attr(windows, ignore = "requires POSIX sh")]
     #[test]
     fn prevents_stdin_hangs_by_redirecting_to_null() {
         let output = execute_bash(BashCommandInput {
