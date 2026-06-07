@@ -10576,6 +10576,7 @@ mod tests {
     #[test]
     fn repl_executes_python_code() {
         let result = execute_tool(
+            "REPL",
             &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 500}),
         )
         .expect("REPL should succeed");
@@ -10604,6 +10605,7 @@ mod tests {
     #[test]
     fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
         let result = execute_tool(
+            "REPL",
             &json!({
                 "language": "python",
                 "code": "import time\ntime.sleep(1)",
@@ -10771,7 +10773,7 @@ printf 'pwsh:%s' "$1"
     fn given_workspace_write_enforcer_when_bash_uses_windows_absolute_path_then_denied() {
         let registry = workspace_write_registry();
         let err = registry
-            .execute(
+            .execute("bash",
                     &json!({ "command": r"cat C:\\Users\\alice\\.ssh\\config" }),
             )
             .expect_err("Windows absolute path should require elevated permission");

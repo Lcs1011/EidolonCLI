@@ -230,13 +230,17 @@ fn is_within_workspace(path: &str, workspace_root: &str) -> bool {
         root_buf.join(path_buf)
     };
 
-    let candidate = normalize_workspace_compare_string(&candidate.to_string_lossy());
-    let root = normalize_workspace_compare_string(&root_buf.to_string_lossy());
+    let candidate = lexically_normalize(&normalize_workspace_compare_string(
+        &candidate.to_string_lossy(),
+    ));
+    let root = lexically_normalize(&normalize_workspace_compare_string(
+        &root_buf.to_string_lossy(),
+    ));
 
-    let root_with_separator = if root.ends_with(std::path::MAIN_SEPARATOR) {
+    let root_with_separator = if root.ends_with('/') {
         root.clone()
     } else {
-        format!("{root}{}", std::path::MAIN_SEPARATOR)
+        format!("{root}/")
     };
 
     candidate == root || candidate.starts_with(&root_with_separator)
@@ -246,19 +250,29 @@ fn is_within_workspace(path: &str, workspace_root: &str) -> bool {
 /// `..` that would climb above an absolute root is clamped at `/`, so the
 /// result can never be a prefix-match for a deeper workspace root.
 fn lexically_normalize(path: &str) -> String {
-    let is_absolute = path.starts_with('/');
+    let normalized = path.replace('\\', "/");
+    let is_absolute = normalized.starts_with('/')
+        || normalized
+            .as_bytes()
+            .get(1)
+            .is_some_and(|byte| *byte == b':');
+
     let mut stack: Vec<&str> = Vec::new();
-    for component in path.split('/') {
+
+    for component in normalized.split('/') {
         match component {
             "" | "." => {}
             ".." => {
-                stack.pop();
+                if !stack.is_empty() && !stack.last().is_some_and(|item| item.ends_with(':')) {
+                    stack.pop();
+                }
             }
             other => stack.push(other),
         }
     }
+
     let joined = stack.join("/");
-    if is_absolute {
+    if normalized.starts_with('/') {
         format!("/{joined}")
     } else {
         joined

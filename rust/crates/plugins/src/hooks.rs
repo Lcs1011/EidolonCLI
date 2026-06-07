@@ -401,39 +401,66 @@ mod tests {
     ) {
         fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
         fs::create_dir_all(root.join("hooks")).expect("hooks dir");
+        #[cfg(windows)]
+        let (pre_name, post_name, failure_name) = ("pre.cmd", "post.cmd", "failure.cmd");
+        #[cfg(not(windows))]
+        let (pre_name, post_name, failure_name) = ("pre.sh", "post.sh", "failure.sh");
 
-        let pre_path = root.join("hooks").join("pre.sh");
-        fs::write(
-            &pre_path,
-            format!("#!/bin/sh\nprintf '%s\\n' '{pre_message}'\n"),
-        )
-        .expect("write pre hook");
-        make_executable(&pre_path);
+        let pre_path = root.join("hooks").join(pre_name);
+        #[cfg(windows)]
+        fs::write(&pre_path, format!("@echo off\r\necho {pre_message}\r\n"))
+            .expect("write pre hook");
+        #[cfg(not(windows))]
+        {
+            fs::write(
+                &pre_path,
+                format!("#!/bin/sh\nprintf '%s\\n' '{pre_message}'\n"),
+            )
+            .expect("write pre hook");
+            make_executable(&pre_path);
+        }
 
-        let post_path = root.join("hooks").join("post.sh");
-        fs::write(
-            &post_path,
-            format!("#!/bin/sh\nprintf '%s\\n' '{post_message}'\n"),
-        )
-        .expect("write post hook");
-        make_executable(&post_path);
+        let post_path = root.join("hooks").join(post_name);
+        #[cfg(windows)]
+        fs::write(&post_path, format!("@echo off\r\necho {post_message}\r\n"))
+            .expect("write post hook");
+        #[cfg(not(windows))]
+        {
+            fs::write(
+                &post_path,
+                format!("#!/bin/sh\nprintf '%s\\n' '{post_message}'\n"),
+            )
+            .expect("write post hook");
+            make_executable(&post_path);
+        }
 
-        let failure_path = root.join("hooks").join("failure.sh");
+        let failure_path = root.join("hooks").join(failure_name);
+        #[cfg(windows)]
         fs::write(
             &failure_path,
-            format!("#!/bin/sh\nprintf '%s\\n' '{failure_message}'\n"),
+            format!("@echo off\r\necho {failure_message}\r\n"),
         )
         .expect("write failure hook");
-        make_executable(&failure_path);
+        #[cfg(not(windows))]
+        {
+            fs::write(
+                &failure_path,
+                format!("#!/bin/sh\nprintf '%s\\n' '{failure_message}'\n"),
+            )
+            .expect("write failure hook");
+            make_executable(&failure_path);
+        }
+
         fs::write(
             root.join(".claude-plugin").join("plugin.json"),
             format!(
-                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"description\": \"hook plugin\",\n  \"hooks\": {{\n    \"PreToolUse\": [\"./hooks/pre.sh\"],\n    \"PostToolUse\": [\"./hooks/post.sh\"],\n    \"PostToolUseFailure\": [\"./hooks/failure.sh\"]\n  }}\n}}"
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"description\": \"hook plugin\",\n  \"hooks\": {{\n    \"PreToolUse\": [\"./hooks/{pre_name}\"],\n    \"PostToolUse\": [\"./hooks/{post_name}\"],\n    \"PostToolUseFailure\": [\"./hooks/{failure_name}\"]\n  }}\n}}"
             ),
         )
         .expect("write plugin manifest");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn collects_and_runs_hooks_from_enabled_plugins() {
         // given
@@ -495,11 +522,16 @@ mod tests {
         let _ = fs::remove_dir_all(second_source_root);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn pre_tool_use_denies_when_plugin_hook_exits_two() {
         // given
+        #[cfg(windows)]
+        let deny_command = "echo blocked by plugin & exit /b 2";
+        #[cfg(not(windows))]
+        let deny_command = "printf 'blocked by plugin'; exit 2";
         let runner = HookRunner::new(crate::PluginHooks {
-            pre_tool_use: vec!["printf 'blocked by plugin'; exit 2".to_string()],
+            pre_tool_use: vec![deny_command.to_string()],
             post_tool_use: Vec::new(),
             post_tool_use_failure: Vec::new(),
         });

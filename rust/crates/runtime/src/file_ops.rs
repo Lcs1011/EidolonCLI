@@ -799,6 +799,11 @@ fn glob_search_impl(
         base_dir.join(pattern).to_string_lossy().into_owned()
     };
 
+    // On Windows, `Path::to_string_lossy()` uses `\` as separator, but the
+    // `glob` / `Pattern` crate treats `\` as an escape character. Normalize
+    // all backslashes to forward slashes so glob patterns work correctly.
+    let search_pattern = normalize_glob_pattern_text(&search_pattern);
+
     // The `glob` crate does not support brace expansion ({a,b,c}).
     // Expand braces into multiple patterns so patterns like
     // `Assets/**/*.{cs,uxml,uss}` work correctly.
@@ -885,7 +890,7 @@ fn grep_search_impl(
     let glob_filter = input
         .glob
         .as_deref()
-        .map(Pattern::new)
+        .map(|g| Pattern::new(&normalize_glob_pattern_text(g)))
         .transpose()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     let file_type = input.file_type.as_deref();
@@ -1003,6 +1008,20 @@ fn canonicalize_workspace_root(workspace_root: &Path) -> PathBuf {
     normalize_windows_extended_path(&canonical)
 }
 
+/// On Windows, `Path::to_string_lossy()` uses `\` as the path separator,
+/// but the `glob` and `Pattern` crate treat `\` as an escape character.
+/// This function converts all backslashes to forward slashes in a pattern.
+fn normalize_glob_pattern_text(pattern: &str) -> String {
+    #[cfg(not(target_os = "windows"))]
+    {
+        pattern.to_owned()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        pattern.replace('\\', "/")
+    }
+}
+
 fn should_skip_glob_dir(entry: &DirEntry) -> bool {
     entry.file_type().is_dir()
         && entry
@@ -1057,7 +1076,7 @@ fn matches_optional_filters(
     file_type: Option<&str>,
 ) -> bool {
     if let Some(glob_filter) = glob_filter {
-        let path_string = path.to_string_lossy();
+        let path_string = normalize_glob_pattern_text(&path.to_string_lossy());
         if !glob_filter.matches(&path_string) && !glob_filter.matches_path(path) {
             return false;
         }

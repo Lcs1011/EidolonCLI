@@ -2905,7 +2905,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_model_strips_openai_prefix_for_default_and_local_preserves_custom_gateways() {
+    fn wire_model_strips_openai_prefix_for_default_local_and_custom_gateways() {
         assert_eq!(
             super::wire_model_for_base_url(
                 "openai/gpt-4o",
@@ -2936,7 +2936,7 @@ mod tests {
                 OpenAiCompatConfig::openai(),
                 "https://openrouter.ai/api/v1",
             ),
-            Cow::Borrowed("openai/gpt-4.1-mini")
+            Cow::Borrowed("gpt-4.1-mini")
         );
         assert_eq!(
             super::wire_model_for_base_url(
@@ -2944,7 +2944,7 @@ mod tests {
                 OpenAiCompatConfig::openai(),
                 "https://not-localhost.example.com/v1",
             ),
-            Cow::Borrowed("openai/gpt-4.1-mini")
+            Cow::Borrowed("gpt-4.1-mini")
         );
     }
 

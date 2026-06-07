@@ -306,9 +306,8 @@ impl PluginTool {
 
     pub fn execute(&self, input: &Value) -> Result<String, PluginError> {
         let input_json = input.to_string();
-        let mut process = Command::new(&self.command);
+        let mut process = plugin_tool_command(&self.command, &self.args);
         process
-            .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -345,6 +344,21 @@ impl PluginTool {
                 }
             )))
         }
+    }
+}
+
+fn plugin_tool_command(command: &str, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        let mut process = Command::new("cmd");
+        process.arg("/C").arg(command).args(args);
+        process
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = Command::new(command);
+        process.args(args);
+        process
     }
 }
 
@@ -3629,6 +3643,7 @@ mod tests {
         let _ = fs::remove_dir_all(source_root);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn aggregates_and_executes_plugin_tools() {
         let _guard = env_guard();
