@@ -593,6 +593,24 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "workspace_search_text",
+            description: "Search file contents and filenames with full-text pattern matching. Combines glob and text search — returns matching file paths and content lines like `grep -Hn`, but uses substring/whole-word/literal matching instead of regex. Use this when you need to search the workspace for text but do not need a regex. Parameters: `pattern` (required), `path` (optional, directory or file to search in), `max_results` (default 50), `context_lines` (default 0), `case_sensitive` (default false), `fixed_strings` (default false — false means whole-word matching, true means literal substring matching).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string" },
+                    "max_results": { "type": "integer", "minimum": 1 },
+                    "context_lines": { "type": "integer", "minimum": 0 },
+                    "case_sensitive": { "type": "boolean" },
+                    "fixed_strings": { "type": "boolean" }
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "WebFetch",
             description:
                 "Fetch a URL, convert it into readable text, and answer a prompt about it.",
@@ -1397,6 +1415,16 @@ fn execute_tool_with_enforcer(
             let required_mode = classify_grep_permission(&grep_input);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, required_mode)?;
             run_grep_search(grep_input)
+        }
+        "workspace_search_text" => {
+            let ws_input: WorkspaceSearchTextInput = from_value(input)?;
+            maybe_enforce_permission_check_with_mode(
+                enforcer,
+                name,
+                input,
+                PermissionMode::ReadOnly,
+            )?;
+            run_workspace_search_text(ws_input)
         }
         "WebFetch" => {
             let web_input = from_value::<WebFetchInput>(input)?;
@@ -2498,6 +2526,149 @@ fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn run_workspace_search_text(input: WorkspaceSearchTextInput) -> Result<String, String> {
+    let pattern = input.pattern.trim().to_string();
+    if pattern.is_empty() {
+        return Err("workspace_search_text: pattern cannot be empty".to_string());
+    }
+
+    let max_results = input.max_results.unwrap_or(50).clamp(1, 200);
+    let context_lines = input.context_lines.unwrap_or(0).min(5);
+    let case_sensitive = input.case_sensitive.unwrap_or(true);
+    let fixed_strings = input.fixed_strings.unwrap_or(true);
+
+    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
+    let search_path = resolve_workspace_search_text_path(input.path.as_deref(), &workspace)?;
+
+    let search_arg = search_path
+        .strip_prefix(&workspace)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+    let mut command = Command::new("rg");
+    command
+        .current_dir(&workspace)
+        .arg("--line-number")
+        .arg("--with-filename")
+        .arg("--no-heading")
+        .arg("--color=never")
+        .arg("--path-separator")
+        .arg("/");
+
+    if fixed_strings {
+        command.arg("--fixed-strings");
+    }
+
+    if !case_sensitive {
+        command.arg("--ignore-case");
+    }
+
+    if context_lines > 0 {
+        command.arg("-C").arg(context_lines.to_string());
+    }
+
+    command.arg("--").arg(&pattern).arg(search_arg);
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(
+                "workspace_search_text requires ripgrep (rg) to be installed and available in PATH"
+                    .to_string(),
+            );
+        }
+        Err(error) => {
+            return Err(format!("workspace_search_text failed to run rg: {error}"));
+        }
+    };
+
+    if !output.status.success() {
+        if output.status.code() == Some(1) {
+            return to_pretty_json(WorkspaceSearchTextOutput {
+                matches: Vec::new(),
+                truncated: false,
+            });
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(format!(
+                "workspace_search_text failed with exit code {:?}",
+                output.status.code()
+            ));
+        }
+        return Err(stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut matches = Vec::new();
+    let mut truncated = false;
+
+    for line in stdout.lines() {
+        let Some(item) = parse_workspace_search_text_line(line) else {
+            continue;
+        };
+
+        if matches.len() >= max_results {
+            truncated = true;
+            break;
+        }
+
+        matches.push(item);
+    }
+
+    to_pretty_json(WorkspaceSearchTextOutput { matches, truncated })
+}
+
+fn resolve_workspace_search_text_path(path: Option<&str>, workspace: &Path) -> Result<PathBuf, String> {
+    let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Ok(workspace.to_path_buf());
+    };
+
+    let candidate = Path::new(path);
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("workspace_search_text: path cannot contain '..'".to_string());
+    }
+
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace.join(candidate)
+    };
+
+    let resolved = absolute.canonicalize().map_err(|error| {
+        format!(
+            "workspace_search_text: search path does not exist or cannot be accessed: {} ({error})",
+            absolute.display()
+        )
+    })?;
+
+    if !resolved.starts_with(workspace) {
+        return Err("workspace_search_text: path escapes workspace".to_string());
+    }
+
+    Ok(resolved)
+}
+
+fn parse_workspace_search_text_line(line: &str) -> Option<WorkspaceSearchTextMatch> {
+    let (path, rest) = line.split_once(':')?;
+    let (line_number, text) = rest.split_once(':')?;
+    let line = line_number.parse::<usize>().ok()?;
+
+    Some(WorkspaceSearchTextMatch {
+        path: path.to_string(),
+        line,
+        text: text.to_string(),
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
     to_pretty_json(execute_web_fetch(&input)?)
 }
@@ -2806,6 +2977,29 @@ struct AnnotateMarkdownInput {
 struct GlobSearchInputValue {
     pattern: String,
     path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceSearchTextInput {
+    pattern: String,
+    path: Option<String>,
+    max_results: Option<usize>,
+    context_lines: Option<usize>,
+    case_sensitive: Option<bool>,
+    fixed_strings: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSearchTextOutput {
+    matches: Vec<WorkspaceSearchTextMatch>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSearchTextMatch {
+    path: String,
+    line: usize,
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
