@@ -594,16 +594,36 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "workspace_search_text",
-            description: "Search file contents and filenames with full-text pattern matching. Combines glob and text search — returns matching file paths and content lines like `grep -Hn`, but uses substring/whole-word/literal matching instead of regex. Use this when you need to search the workspace for text but do not need a regex. Parameters: `pattern` (required), `path` (optional, directory or file to search in), `max_results` (default 50), `context_lines` (default 0), `case_sensitive` (default false), `fixed_strings` (default false — false means whole-word matching, true means literal substring matching).",
+            description: "Search text inside the current workspace only. This is a safe replacement for PowerShell Select-String when the AI needs to locate code or text. It uses ripgrep directly through Command::new(\"rg\") and never invokes PowerShell, cmd, bash, or shell.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string" },
-                    "path": { "type": "string" },
-                    "max_results": { "type": "integer", "minimum": 1 },
-                    "context_lines": { "type": "integer", "minimum": 0 },
-                    "case_sensitive": { "type": "boolean" },
-                    "fixed_strings": { "type": "boolean" }
+                    "pattern": {
+                        "type": "string",
+                        "description": "Text or regex pattern to search for."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional workspace-relative file or directory to search. Defaults to the workspace root."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of result lines to return. Defaults to 50. Hard capped at 200.",
+                        "minimum": 1
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Number of context lines requested from ripgrep. Defaults to 0. Hard capped at 5.",
+                        "minimum": 0
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Whether the search is case-sensitive. Defaults to true."
+                    },
+                    "fixed_strings": {
+                        "type": "boolean",
+                        "description": "Treat pattern as a literal string instead of regex. Defaults to true."
+                    }
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
@@ -2657,15 +2677,40 @@ fn resolve_workspace_search_text_path(path: Option<&str>, workspace: &Path) -> R
 }
 
 fn parse_workspace_search_text_line(line: &str) -> Option<WorkspaceSearchTextMatch> {
-    let (path, rest) = line.split_once(':')?;
-    let (line_number, text) = rest.split_once(':')?;
-    let line = line_number.parse::<usize>().ok()?;
+    parse_workspace_search_text_line_with_separator(line, ':')
+        .or_else(|| parse_workspace_search_text_line_with_separator(line, '-'))
+}
 
-    Some(WorkspaceSearchTextMatch {
-        path: path.to_string(),
-        line,
-        text: text.to_string(),
-    })
+fn parse_workspace_search_text_line_with_separator(
+    line: &str,
+    separator: char,
+) -> Option<WorkspaceSearchTextMatch> {
+    for (index, character) in line.char_indices() {
+        if character != separator {
+            continue;
+        }
+
+        let path = &line[..index];
+        let rest = &line[index + character.len_utf8()..];
+        let Some((line_number, text)) = rest.split_once(separator) else {
+            continue;
+        };
+
+        if line_number.is_empty() || !line_number.chars().all(|character| character.is_ascii_digit())
+        {
+            continue;
+        }
+
+        let line = line_number.parse::<usize>().ok()?;
+
+        return Some(WorkspaceSearchTextMatch {
+            path: path.to_string(),
+            line,
+            text: text.to_string(),
+        });
+    }
+
+    None
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -9888,6 +9933,7 @@ mod tests {
             .contains("Command exceeded timeout"));
 
         let background = execute_tool(
+            "bash",
             &json!({ "command": "sleep 1", "run_in_background": true }),
         )
         .expect("bash background should succeed");
@@ -9899,6 +9945,7 @@ mod tests {
     #[test]
     fn bash_tool_classifies_test_timeout_as_hung_with_provenance() {
         let timeout = execute_tool(
+            "bash",
             &json!({ "command": "sleep 1 # cargo test slow_case", "timeout": 10 }),
         )
         .expect("bash timeout should return output");
@@ -9932,6 +9979,7 @@ mod tests {
         std::env::set_current_dir(&root).expect("set cwd");
 
         let output = execute_tool(
+            "bash",
             &json!({ "command": "cargo test --workspace --all-targets" }),
         )
         .expect("preflight should return structured output");
@@ -9981,6 +10029,7 @@ mod tests {
         std::env::set_current_dir(&root).expect("set cwd");
 
         let output = execute_tool(
+            "bash",
             &json!({ "command": "printf 'targeted ok'; cargo test -p runtime stale_branch" }),
         )
         .expect("targeted commands should still execute");
